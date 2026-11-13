@@ -9,115 +9,73 @@ static void sleep_ms(int ms) { Sleep(ms); }
 #else
 #include <time.h>
 static void sleep_ms(int ms) {
-    struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
-    nanosleep(&ts, NULL);
+    struct timespec ts; ts.tv_sec = ms / 1000; ts.tv_nsec = (ms % 1000) * 1000000L; nanosleep(&ts, NULL);
 }
 #endif
 
-/* Режим ребёнка: спит N мс и возвращает заданный код */
-int child_mode(int exit_code, int sleep_time) {
-    sleep_ms(sleep_time);
-    return exit_code;
-}
-
-int run_test(const char *name, const char *argv[], int expected_code) {
-    pl_process proc;
-    if (pl_start(argv, &proc) != 0) {
-        printf("[FAIL] %s: pl_start failed\n", name);
-        return 0;
-    }
-
-    int code;
-    if (pl_wait(&proc, &code) != 0) {
-        printf("[FAIL] %s: pl_wait failed\n", name);
-        return 0;
-    }
-
-    if (code == expected_code) {
-        printf("[ OK ] %s (code=%d)\n", name, code);
-        return 1;
-    } else {
-        printf("[FAIL] %s: expected %d, got %d\n", name, expected_code, code);
-        return 0;
-    }
-}
+static const char *TRICKY_ARG = "hello \"big\" world\\";
 
 int main(int argc, char *argv[]) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
 #endif
-
-    /* Режим ребёнка */
     if (argc >= 4 && strcmp(argv[1], "--child") == 0) {
-        return child_mode(atoi(argv[2]), atoi(argv[3]));
+        sleep_ms(atoi(argv[3])); return atoi(argv[2]);
+    }
+    if (argc >= 3 && strcmp(argv[1], "--argcheck") == 0) {
+        return strcmp(argv[2], TRICKY_ARG) == 0 ? 0 : 1;
     }
 
-    const char *self = argv[0];
-    int passed = 0;
-    int total = 5;
+    const char *self = argv[0]; int passed = 0; int total = 5;
 
-    /* Тест 1: Родитель работает, пока ребёнок спит 1с, код 42 */
     {
-        const char *args[] = { self, "--child", "42", "1000", NULL };
-        pl_process proc;
+        const char *args[] = { self, "--child", "42", "1000", NULL }; pl_process proc;
         if (pl_start(args, &proc) == 0) {
-            int polls = 0;
-            for (int i = 0; i < 20; i++) {
-                int code;
+            int polls = 0, code = -1, finished = 0;
+            for (int i = 0; i < 30; i++) {
                 int res = pl_poll(&proc, &code);
-                if (res == 1) break;
-                if (res == 0) polls++;
-                sleep_ms(100);
+                if (res == 1) { finished = 1; break; } if (res < 0) break;
+                polls++; sleep_ms(100);
             }
-            int code;
-            pl_wait(&proc, &code);
-            if (polls > 3 && code == 42) {
-                printf("[ OK ] Test 1: parent worked while child slept (%d polls, code=42)\n", polls);
-                passed++;
-            } else {
-                printf("[FAIL] Test 1: polls=%d, code=%d\n", polls, code);
-            }
-        } else {
-            printf("[FAIL] Test 1: pl_start failed\n");
-        }
+            if (!finished) pl_wait(&proc, &code);
+            if (polls > 3 && code == 42) { printf("[ OK ] Test 1: parent worked while child slept (%d polls, code=42)\n", polls); passed++; }
+            else { printf("[FAIL] Test 1: polls=%d, code=%d\n", polls, code); }
+        } else { printf("[FAIL] Test 1: pl_start failed\n"); }
     }
-
-    /* Тест 2: Код возврата 7 */
     {
-        const char *args[] = { self, "--child", "7", "300", NULL };
-        if (run_test("Test 2", args, 7)) passed++;
+        const char *args[] = { self, "--child", "7", "300", NULL }; pl_process proc;
+        if (pl_start(args, &proc) == 0) {
+            int code = -1; pl_wait(&proc, &code);
+            if (code == 7) { printf("[ OK ] Test 2 (code=7)\n"); passed++; }
+            else { printf("[FAIL] Test 2: expected 7, got %d\n", code); }
+        } else { printf("[FAIL] Test 2: pl_start failed\n"); }
     }
-
-    /* Тест 3: Аргумент с пробелами */
     {
-        const char *args[] = { self, "--child", "hello \"big\" world\\", "0", NULL };
-        if (run_test("Test 3", args, 0)) passed++;
+        const char *args[] = { self, "--argcheck", TRICKY_ARG, NULL }; pl_process proc;
+        if (pl_start(args, &proc) == 0) {
+            int code = -1; pl_wait(&proc, &code);
+            if (code == 0) { printf("[ OK ] Test 3: argument passed intact\n"); passed++; }
+            else { printf("[FAIL] Test 3: child got a distorted argument (code=%d)\n", code); }
+        } else { printf("[FAIL] Test 3: pl_start failed\n"); }
     }
-
-    /* Тест 4: Несуществующая программа */
     {
-        const char *args[] = { "no_such_program_12345", NULL };
-        pl_process proc;
-        if (pl_start(args, &proc) == -1) {
-            printf("[ OK ] Test 4: nonexistent program returned -1\n");
-            passed++;
-        } else {
-            int code;
-            pl_wait(&proc, &code);
-            printf("[FAIL] Test 4: expected -1, got start success\n");
-        }
+        const char *args[] = { "no_such_program_12345", NULL }; pl_process proc;
+        if (pl_start(args, &proc) == -1) { printf("[ OK ] Test 4: nonexistent program returned -1\n"); passed++; }
+        else { int code; pl_wait(&proc, &code); printf("[FAIL] Test 4: expected -1, got start success\n"); }
     }
-
-    /* Тест 5: Код 300 (Linux обрезает до 8 бит = 44) */
     {
-        const char *args[] = { self, "--child", "300", "0", NULL };
+        const char *args[] = { self, "--child", "300", "0", NULL }; pl_process proc;
 #ifdef _WIN32
-        if (run_test("Test 5", args, 300)) passed++;
+        const int expected = 300;
 #else
-        if (run_test("Test 5", args, 44)) passed++;
+        const int expected = 44;
 #endif
+        if (pl_start(args, &proc) == 0) {
+            int code = -1; pl_wait(&proc, &code);
+            if (code == expected) { printf("[ OK ] Test 5 (code=%d)\n", code); passed++; }
+            else { printf("[FAIL] Test 5: expected %d, got %d\n", expected, code); }
+        } else { printf("[FAIL] Test 5: pl_start failed\n"); }
     }
-
     printf("\n%d/%d tests passed\n", passed, total);
     return (passed == total) ? 0 : 1;
 }

@@ -9,7 +9,9 @@ extern "C" {
 
 typedef struct {
     intptr_t handle;
-    long pid;
+    long     pid;
+    int      finished;
+    int      exit_code;
 } pl_process;
 
 int pl_start(const char *const argv[], pl_process *proc);
